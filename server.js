@@ -1,13 +1,22 @@
 const Fastify = require("fastify");
 const WebSocket = require("ws");
+const fs = require("fs");
 
 const fastify = Fastify({ logger: false });
 const PORT = process.env.PORT || 3000;
 
-let lastResults = [];
-let currentResult = null;
-let currentSession = null;
+// Đọc file du_doan.txt
+const duDoanData = fs.readFileSync("du_doan.txt", "utf8");
 
+function duDoanTuPattern(pattern13) {
+  const line = duDoanData.split("\n").find(line => line.startsWith(pattern13));
+  if (!line) return null;
+  if (line.includes("Dự đoán: T")) return "Tài";
+  if (line.includes("Dự đoán: X")) return "Xỉu";
+  return null;
+}
+
+let lastResults = [];
 let ws = null;
 let reconnectInterval = 5000;
 let intervalCmd = null;
@@ -23,19 +32,12 @@ function connectWebSocket() {
   ws = new WebSocket("wss://websocket.azhkthg1.net/websocket");
 
   ws.on("open", () => {
-    console.log("✅ Đã kết nối WebSocket");
-
     const authPayload = [
-      1,
-      "MiniGame",
-      "SC_xigtupou",
-      "conga999",
-      {
+      1, "MiniGame", "SC_xigtupou", "conga999", {
         info: "{\"ipAddress\":\"171.246.10.199\",\"userId\":\"7c54ec3f-ee1a-428c-a56e-1bc14fd27e57\",\"username\":\"SC_xigtupou\",\"timestamp\":1748266471861,\"refreshToken\":\"ce8de19af18f4417bb68c3632408d4d7.479079475124482181468c8923b636af\"}",
-        signature: "0EC9E9B2311CD352561D9556F88F6AB4167502EAC5F9767D07D43E521FE1BA056C7C67DF0491D20BCE9877B71373A2115CC61E9ED43B8AF1EF6EAC3757EA5B2A46BCB0C519EDCB46DB0EB9ACA445D7076CC1F3F830745609C02BE9F4D86CF419924E33EE3398F1EE4FE65FD045C1A2EE05C85CDBF2EAE6E4297E000664E4CC21"
+        signature: "0EC9..." // Rút gọn
       }
     ];
-
     ws.send(JSON.stringify(authPayload));
     clearInterval(intervalCmd);
     intervalCmd = setInterval(sendCmd1005, 5000);
@@ -51,77 +53,66 @@ function connectWebSocket() {
           d2: item.d2,
           d3: item.d3
         }));
-
-        const latest = lastResults[0];
-        const total = latest.d1 + latest.d2 + latest.d3;
-        currentResult = total >= 11 ? "Tài" : "Xỉu";
-        currentSession = latest.sid;
       }
-    } catch (e) {}
+    } catch {}
   });
 
   ws.on("close", () => {
-    console.warn("⚠️ WebSocket đóng, đang thử lại...");
     clearInterval(intervalCmd);
     setTimeout(connectWebSocket, reconnectInterval);
   });
 
-  ws.on("error", (err) => {
-    console.error("❌ Lỗi WebSocket:", err.message);
-    ws.close();
-  });
+  ws.on("error", () => ws.close());
 }
 
 connectWebSocket();
 
-fastify.get("/api/taixiu", async (request, reply) => {
-  const validResults = [...lastResults]
-    .reverse()
-    .filter(item => item.d1 && item.d2 && item.d3);
+function analyzePrediction() {
+  const recent13 = lastResults.slice(0, 13);
+  if (recent13.length < 13) return { prediction: null, pattern13: "", reason: "Chưa đủ 13 phiên" };
 
-  if (validResults.length < 1) {
+  const pattern13 = recent13.map(r => {
+    const sum = r.d1 + r.d2 + r.d3;
+    return sum >= 11 ? "T" : "X";
+  }).reverse().join("");
+
+  const prediction = duDoanTuPattern(pattern13);
+  return {
+    prediction,
+    pattern13,
+    reason: prediction ? "Khớp pattern từ file" : "Không khớp pattern nào"
+  };
+}
+
+fastify.get("/api/taixiu", async () => {
+  const current = lastResults[0];
+  if (!current) {
     return {
       current_result: null,
       current_session: null,
       next_session: null,
       prediction: null,
-      used_pattern: ""
+      used_pattern: "",
+      reason: "Chưa có dữ liệu"
     };
   }
 
-  const current = validResults[0];
-  const total = current.d1 + current.d2 + current.d3;
-  const result = total >= 11 ? "Tài" : "Xỉu";
+  const sum = current.d1 + current.d2 + current.d3;
+  const result = sum >= 11 ? "Tài" : "Xỉu";
   const currentSession = current.sid;
   const nextSession = currentSession + 1;
-  const prediction = result === "Tài" ? "Xỉu" : "Tài";
-
-  const pattern = validResults
-    .slice(0, 6)
-    .map(item => {
-      const sum = item.d1 + item.d2 + item.d3;
-      return sum >= 11 ? "T" : "X";
-    })
-    .reverse()
-    .join("");
+  const duDoan = analyzePrediction();
 
   return {
     current_result: result,
     current_session: currentSession,
     next_session: nextSession,
-    prediction: prediction,
-    used_pattern: pattern
+    prediction: duDoan.prediction,
+    used_pattern: duDoan.pattern13,
+    reason: duDoan.reason
   };
 });
 
-const start = async () => {
-  try {
-    const address = await fastify.listen({ port: PORT, host: "0.0.0.0" });
-    console.log(`🚀 Server đang chạy tại ${address}`);
-  } catch (err) {
-    console.error(err);
-    process.exit(1);
-  }
-};
-
-start();
+fastify.listen({ port: PORT, host: "0.0.0.0" }).then(addr => {
+  console.log("✅ Server đang chạy tại:", addr);
+});
